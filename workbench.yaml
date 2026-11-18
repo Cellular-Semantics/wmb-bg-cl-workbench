@@ -1,0 +1,136 @@
+# Workbench configuration: which ontology branches are checked out, how they are
+# synced, which knowledgebases (KBs) are built from them, and which are served by
+# Owlery. Commit this file: it is the shared set-up for everyone using this repo. Put
+# machine-specific overrides (e.g. paths to existing checkouts, heap sizes) in
+# workbench.local.yaml, which is git-ignored and deep-merged on top.
+#
+# After editing: `uv run wb sync` (checkouts), `uv run wb build` (KBs),
+# `uv run wb serve` (Owlery). `uv run wb kbs` shows what this file expands to.
+
+tools:
+  robot_version: 1.9.10      # downloaded to .tools/ by `wb setup` unless `robot` is on PATH
+  owlery_version: 0.17.2
+  robot_heap: 16G            # ROBOT_JAVA_ARGS -Xmx for builds
+
+sources:
+  # Each source is a git repo. Every entry under `checkouts` becomes a git worktree
+  # at sources/<source>/<checkout-name>/, sharing one partial (blob-less) clone.
+  #   - master                  branch (tracks origin/master)
+  #   - branch: my-feature      same, long form
+  #   - pr: 3788                GitHub pull request head (fetched as pr-3788)
+  #   - {branch: x, name: y}    custom checkout name (used in KB names)
+  # To use checkouts you already have, set `path:` (here or in workbench.local.yaml)
+  # to an existing clone; `checkouts: auto` then picks up every worktree of it.
+  #
+  # sync (what `wb sync` / `wb watch --sync` does to each checkout):
+  #   ff     fetch, then fast-forward clean checkouts to their upstream (default)
+  #   fetch  fetch only
+  #   none   leave alone (default for `path:` sources: you manage them)
+  #
+  # A source without `edit` is checkout-only: it is synced but can't be a KB part
+  # (the taxonomy repos below). `git_config` is set in the source's clone.
+
+  # Cell Ontology. WMBO (CL_43…) and BGO ("(Primate)" CL_431…) terms come in through
+  # components/{wmbo,bgo}-cl-comp.owl; fix those upstream, never in cl-edit.owl.
+  cl:
+    repo: https://github.com/obophenotype/cell-ontology.git
+    edit: src/ontology/cl-edit.owl
+    catalog: src/ontology/catalog-v001.xml
+    checkouts:
+      - master
+    sync: ff
+
+  # Provisional Cell Ontology: assembles *-pcl-comp.owl from BDSO, WHBO and WMBO.
+  pcl:
+    repo: https://github.com/obophenotype/provisional_cell_ontology.git
+    edit: src/ontology/pcl-edit.owl
+    catalog: src/ontology/catalog-v001.xml
+    checkouts:
+      - master
+    sync: ff
+
+  # Whole Mouse Brain ontology (CCN20230722): PCL classes plus the CL product.
+  wmbo:
+    repo: https://github.com/Cellular-Semantics/whole_mouse_brain_ontology.git
+    edit: src/ontology/wmbo-edit.owl
+    catalog: src/ontology/catalog-v001.xml
+    checkouts:
+      - main
+    sync: ff
+    # components/all_templates.owl is tracked with git-lfs. These settings check out
+    # LFS pointers without needing git-lfs installed; drop them if you have git-lfs.
+    git_config:
+      filter.lfs.process: ""
+      filter.lfs.required: false
+      filter.lfs.smudge: cat
+      filter.lfs.clean: cat
+
+  # HMBA basal ganglia ontology (CCN20250428).
+  bgo:
+    repo: https://github.com/Cellular-Semantics/hmba_basal_ganglia_ontology.git
+    edit: src/ontology/bgo-edit.owl
+    catalog: src/ontology/catalog-v001.xml
+    checkouts:
+      - main
+    sync: ff
+
+  # Taxonomies. curation_tables/annotation.tsv (cell_ontology_term_id) sets the
+  # asserted CL parent of every WMBO / BGO term.
+  wmb_taxonomy:
+    repo: https://github.com/brain-bican/whole_mouse_brain_taxonomy.git
+    checkouts:
+      - main
+    sync: ff
+
+  bg_taxonomy:
+    repo: https://github.com/brain-bican/basal_ganglia_consensus_taxonomy.git
+    checkouts:
+      - main
+    sync: ff
+
+kbs:
+  # A KB is a merge of parts. Each part is the import closure of a source's edit file
+  # (or a local `file:` / remote `url:`). `{source}` placeholders in the name expand
+  # over that source's checkouts: by default all of them; `matrix` restricts this.
+  #
+  # drop_import_subjects: in that part's import files (catalog entries under
+  # `filter_dirs`, default [imports]), drop every axiom whose subject has one of these
+  # ID prefixes. Use it where another part is the authority for those terms, so the
+  # KB reasons over the edit-branch version, not a stale import slice.
+
+  - name: cl-{cl}
+    parts:
+      - source: cl
+
+  # BGO with its CL slice replaced by cl-edit.
+  - name: bgo-{bgo}__cl-{cl}
+    parts:
+      - source: bgo
+        drop_import_subjects: [CL]
+      - source: cl
+    heap: 10G
+
+  # PCL with its CL slice replaced by cl-edit.
+  - name: pcl-{pcl}__cl-{cl}
+    parts:
+      - source: pcl
+        drop_import_subjects: [CL]
+      - source: cl
+    heap: 10G
+
+  # WMBO + CL needs components/all_templates.owl, which is a git-lfs pointer here
+  # unless git-lfs is installed (remove the wmbo `git_config` above). WMBO also carries
+  # its own copy of the CL product; ../owlery/build.sh removes it with `robot unmerge`,
+  # which the workbench doesn't do yet (docs/design.md).
+  # - name: wmbo-{wmbo}__cl-{cl}
+  #   parts:
+  #     - {source: wmbo, drop_import_subjects: [CL]}
+  #     - {source: cl}
+  #   heap: 10G
+
+serve:
+  port: 8090                 # proxy: http://localhost:8090/kbs/<kb>/...
+  backend_port_base: 9100    # one Owlery process per KB from here up
+  reasoner: elk              # elk | whelk | structural | hermit | jfact
+  heap: 6G                   # per KB unless the KB sets `heap`
+  kbs: "*"                   # which KBs `wb serve` starts: "*" or a list of names/globs
